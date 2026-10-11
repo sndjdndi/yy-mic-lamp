@@ -1,0 +1,6 @@
+*.log
+*.pdb
+*.tmp
+.vs/
+bin/
+obj/
