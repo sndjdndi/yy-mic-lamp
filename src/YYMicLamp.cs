@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly:System.Reflection.AssemblyTitle("YY 麦克风灯")]
 [assembly:System.Reflection.AssemblyDescription("通过 YY 自身的辅助功能按钮切换自由发言；无键盘模拟。")]
-[assembly:System.Reflection.AssemblyVersion("1.4.1.0")]
+[assembly:System.Reflection.AssemblyVersion("1.4.2.0")]
 
 static class Native {
  public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
@@ -205,7 +206,7 @@ sealed class LampForm:Form {
   gameItem.CheckOnClick=true;gameItem.Checked=gameMode;
   gameItem.CheckedChanged+=delegate{gameMode=gameItem.Checked;topTimer.Interval=gameMode?500:2000;SavePosition();KeepOnTop();backend.Trace("GAME_MODE "+gameMode);};
   visibilityItem.Click+=delegate{ToggleVisibility();};
-  logsItem.Click+=delegate{try{string folder=Path.GetDirectoryName(log);Directory.CreateDirectory(folder);string explorer=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),"explorer.exe");Process.Start(new ProcessStartInfo(explorer,"/e,\""+folder+"\""){UseShellExecute=false});backend.Trace("LOG_FOLDER_OPEN");}catch(Exception e){backend.Trace("LOG_FOLDER_OPEN_FAILED");MessageBox.Show("无法打开日志文件夹。日志位置："+Path.GetDirectoryName(log)+Environment.NewLine+e.GetType().Name,"YY 麦克风灯",MessageBoxButtons.OK,MessageBoxIcon.Warning);}};
+  logsItem.Click+=delegate{try{string folder=Path.GetDirectoryName(log);Directory.CreateDirectory(folder);backend.Trace("LOG_FOLDER_OPEN_REQUEST");OpenFolderInExplorer(folder);backend.Trace("LOG_FOLDER_OPEN_OK");}catch(Exception e){backend.Trace("LOG_FOLDER_OPEN_FAILED");MessageBox.Show("无法打开日志文件夹。日志位置："+Path.GetDirectoryName(log)+Environment.NewLine+e.GetType().Name,"YY 麦克风灯",MessageBoxButtons.OK,MessageBoxIcon.Warning);}};
   menu.Items.Add(visibilityItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(gameItem);menu.Items.Add(logsItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add("退出",null,delegate{Close();});ContextMenuStrip=menu;
   tray.Icon=(Icon)Icon.Clone();tray.Text="YY 麦克风灯（双击显示或隐藏）";tray.ContextMenuStrip=menu;tray.Visible=true;
   tray.MouseDoubleClick+=delegate(object sender,MouseEventArgs e){if(e.Button==MouseButtons.Left)ToggleVisibility();};
@@ -243,6 +244,7 @@ sealed class LampForm:Form {
   wave.AccessibleName="YY 音量（"+(micState!=true?"关麦，零波动":audioActive?"已检测到输入":"未检测到 YY 音频输入")+"）";tip.SetToolTip(wave,text);
  }
  void RefreshHints(){tip.SetToolTip(this,"拖动可移动，右键设置游戏置顶");AccessibleDescription=status+"，可拖动";}
+ static void OpenFolderInExplorer(string folder){Type shellType=Type.GetTypeFromProgID("Shell.Application");if(shellType==null)throw new InvalidOperationException("ShellUnavailable");object shell=Activator.CreateInstance(shellType);try{shellType.InvokeMember("Explore",BindingFlags.InvokeMethod,null,shell,new object[]{folder});}finally{if(Marshal.IsComObject(shell))Marshal.ReleaseComObject(shell);}}
  void ToggleVisibility(){if(Visible)Hide();else{Show();KeepOnTop();}visibilityItem.Text=Visible?"隐藏悬浮窗":"显示悬浮窗";backend.Trace("OVERLAY_VISIBLE "+Visible);}
  void KeepOnTop(){if(!IsDisposed&&IsHandleCreated&&Visible)Native.SetWindowPos(Handle,new IntPtr(-1),0,0,0,0,0x213);}
  Point ClampLocation(Point point){var area=Screen.FromPoint(point).WorkingArea;return new Point(Math.Max(area.Left,Math.Min(point.X,area.Right-CardWidth)),Math.Max(area.Top,Math.Min(point.Y,area.Bottom-CardHeight)));}
