@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 [assembly:System.Reflection.AssemblyTitle("YY 麦克风灯")]
 [assembly:System.Reflection.AssemblyDescription("通过 YY 自身的辅助功能按钮切换自由发言；无键盘模拟。")]
-[assembly:System.Reflection.AssemblyVersion("1.4.0.0")]
+[assembly:System.Reflection.AssemblyVersion("1.4.1.0")]
 
 static class Native {
  public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
@@ -109,7 +109,7 @@ sealed class Backend:IDisposable {
  public Backend(string path){logPath=path;Log("APP_START version="+System.Reflection.Assembly.GetExecutingAssembly().GetName().Version);worker=new Thread(Loop);worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();}
  public void Request(){Interlocked.Exchange(ref requested,1);signal.Set();}
  void Log(string s){try{string dir=Path.GetDirectoryName(logPath);if(!String.IsNullOrEmpty(dir))Directory.CreateDirectory(dir);if(File.Exists(logPath)&&new FileInfo(logPath).Length>1024*1024){string old=logPath+".1";if(File.Exists(old))File.Delete(old);File.Move(logPath,old);}File.AppendAllText(logPath,DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")+" "+s+Environment.NewLine,new UTF8Encoding(false));}catch{}}
- public void Trace(string s){if(s=="LAMP CLICK")Log("LAMP_CLICK");else if(s.StartsWith("OVERLAY_VISIBLE "))Log(s);else if(s.StartsWith("GAME_MODE "))Log(s);}
+ public void Trace(string s){if(s=="LAMP CLICK")Log("LAMP_CLICK");else if(s.StartsWith("OVERLAY_VISIBLE "))Log(s);else if(s.StartsWith("GAME_MODE "))Log(s);else if(s.StartsWith("LOG_FOLDER_OPEN"))Log(s);}
  void Publish(bool? s,string text,bool busy){var ev=Update;if(ev!=null)ev(s,text,busy);}
  void Loop(){
   DateTime nextFind=DateTime.MinValue;bool? last=null;
@@ -205,7 +205,7 @@ sealed class LampForm:Form {
   gameItem.CheckOnClick=true;gameItem.Checked=gameMode;
   gameItem.CheckedChanged+=delegate{gameMode=gameItem.Checked;topTimer.Interval=gameMode?500:2000;SavePosition();KeepOnTop();backend.Trace("GAME_MODE "+gameMode);};
   visibilityItem.Click+=delegate{ToggleVisibility();};
-  logsItem.Click+=delegate{try{Process.Start("explorer.exe",Path.GetDirectoryName(log));}catch{}};
+  logsItem.Click+=delegate{try{string folder=Path.GetDirectoryName(log);Directory.CreateDirectory(folder);string explorer=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),"explorer.exe");Process.Start(new ProcessStartInfo(explorer,"/e,\""+folder+"\""){UseShellExecute=false});backend.Trace("LOG_FOLDER_OPEN");}catch(Exception e){backend.Trace("LOG_FOLDER_OPEN_FAILED");MessageBox.Show("无法打开日志文件夹。日志位置："+Path.GetDirectoryName(log)+Environment.NewLine+e.GetType().Name,"YY 麦克风灯",MessageBoxButtons.OK,MessageBoxIcon.Warning);}};
   menu.Items.Add(visibilityItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(gameItem);menu.Items.Add(logsItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add("退出",null,delegate{Close();});ContextMenuStrip=menu;
   tray.Icon=(Icon)Icon.Clone();tray.Text="YY 麦克风灯（双击显示或隐藏）";tray.ContextMenuStrip=menu;tray.Visible=true;
   tray.MouseDoubleClick+=delegate(object sender,MouseEventArgs e){if(e.Button==MouseButtons.Left)ToggleVisibility();};
