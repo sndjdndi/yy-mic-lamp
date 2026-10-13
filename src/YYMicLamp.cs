@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 [assembly:System.Reflection.AssemblyTitle("YY 麦克风灯")]
 [assembly:System.Reflection.AssemblyDescription("通过 YY 自身的辅助功能按钮切换自由发言；无键盘模拟。")]
-[assembly:System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly:System.Reflection.AssemblyVersion("1.4.0.0")]
 
 static class Native {
  public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
@@ -58,21 +58,25 @@ sealed class Channel {
    if(IsPush(ReadName(Voice)))Voice.accDoDefaultAction(0);
   }
  }
- public static Channel Find(){
+ public static Channel Find(out string reason){
   var ids=new HashSet<int>();foreach(var p in Process.GetProcessesByName("YY")){ids.Add(p.Id);p.Dispose();}
-  if(ids.Count==0)return null;
+  if(ids.Count==0){reason="YY_PROCESS_NOT_FOUND";return null;}
   var roots=new List<IntPtr>();
   Native.EnumWindows(delegate(IntPtr h,IntPtr l){uint id;Native.GetWindowThreadProcessId(h,out id);if(ids.Contains((int)id)&&Native.Class(h)=="QWidget"&&Regex.IsMatch(Native.Title(h),"^\\d+[-－]"))roots.Add(h);return true;},IntPtr.Zero);
+  if(roots.Count==0){reason="YY_CHANNEL_WINDOW_NOT_FOUND";return null;}
   roots.Sort(delegate(IntPtr a,IntPtr b){return Native.IsWindowVisible(b).CompareTo(Native.IsWindowVisible(a));});
+  int hostCount=0,accessibleCount=0;
   foreach(var root in roots){
    var hosts=new List<IntPtr>();Native.EnumChildWindows(root,delegate(IntPtr h,IntPtr l){if(Native.Class(h)=="Chrome_RenderWidgetHostHWND")hosts.Add(h);return true;},IntPtr.Zero);
+   hostCount+=hosts.Count;
    foreach(var h in hosts){
     try{
-     object obj;Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)!=0)continue;
-     var c=new Channel();c.Host=h;int count=0;Scan(obj as IAccessible,c,0,ref count);if(c.Voice!=null)return c;
+     object obj;Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)!=0)continue;accessibleCount++;
+     var c=new Channel();c.Host=h;int count=0;Scan(obj as IAccessible,c,0,ref count);if(c.Voice!=null){reason="CONNECTED";return c;}
     }catch{}
    }
   }
+  reason=hostCount==0?"YY_RENDER_HOST_NOT_FOUND":accessibleCount==0?"YY_ACCESSIBILITY_UNAVAILABLE":"YY_VOICE_CONTROL_NOT_FOUND";
   return null;
  }
  static void Scan(IAccessible a,Channel result,int depth,ref int visited){
@@ -101,18 +105,19 @@ sealed class Backend:IDisposable {
  public event Action<bool?,string,bool> Update;
  Channel channel;
  readonly string logPath;
- public Backend(string path){logPath=path;worker=new Thread(Loop);worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();}
+ string lastFindReason="";DateTime lastFindLog=DateTime.MinValue;
+ public Backend(string path){logPath=path;Log("APP_START version="+System.Reflection.Assembly.GetExecutingAssembly().GetName().Version);worker=new Thread(Loop);worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();}
  public void Request(){Interlocked.Exchange(ref requested,1);signal.Set();}
- void Log(string s){if(logPath!=null)try{File.AppendAllText(logPath,DateTime.Now.ToString("HH:mm:ss.fff")+" "+s+Environment.NewLine,Encoding.UTF8);}catch{}}
- public void Trace(string s){Log(s);}
+ void Log(string s){try{string dir=Path.GetDirectoryName(logPath);if(!String.IsNullOrEmpty(dir))Directory.CreateDirectory(dir);if(File.Exists(logPath)&&new FileInfo(logPath).Length>1024*1024){string old=logPath+".1";if(File.Exists(old))File.Delete(old);File.Move(logPath,old);}File.AppendAllText(logPath,DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")+" "+s+Environment.NewLine,new UTF8Encoding(false));}catch{}}
+ public void Trace(string s){if(s=="LAMP CLICK")Log("LAMP_CLICK");else if(s.StartsWith("OVERLAY_VISIBLE "))Log(s);else if(s.StartsWith("GAME_MODE "))Log(s);}
  void Publish(bool? s,string text,bool busy){var ev=Update;if(ev!=null)ev(s,text,busy);}
  void Loop(){
   DateTime nextFind=DateTime.MinValue;bool? last=null;
   while(!stop){
    try{
-    if(channel==null&&DateTime.UtcNow>=nextFind){channel=Channel.Find();nextFind=DateTime.UtcNow.AddSeconds(2);if(channel!=null)Log("CONNECTED host="+channel.Host);}
+    if(channel==null&&DateTime.UtcNow>=nextFind){string reason;channel=Channel.Find(out reason);nextFind=DateTime.UtcNow.AddSeconds(2);if(channel!=null){Log("YY_CONNECTED");lastFindReason="";}else if(reason!=lastFindReason||DateTime.UtcNow>=lastFindLog){Log("YY_WAITING reason="+reason);lastFindReason=reason;lastFindLog=DateTime.UtcNow.AddSeconds(15);}}
     bool? state=channel==null?null:channel.ReadState();
-    if(!state.HasValue){channel=null;Publish(null,"未连接 YY 发言按钮，请打开 YY 并进入频道",false);}
+    if(!state.HasValue){if(last.HasValue)Log("YY_STATE_UNAVAILABLE");last=null;channel=null;Publish(null,"未连接 YY 发言按钮，请打开 YY 并进入频道",false);}
     else {
      if(state!=last){Log("STATE "+(state.Value?"OPEN":"CLOSED"));last=state;}
      Publish(state,state.Value?"开麦 · 点击关麦，拖动可移动":"关麦 · 点击开麦，拖动可移动",false);
@@ -120,17 +125,17 @@ sealed class Backend:IDisposable {
     if(Interlocked.Exchange(ref requested,0)==1){
      if(channel==null){Publish(null,"未找到 YY 发言按钮，暂时无法操作",false);}
      else {
-      bool before=channel.ReadState().Value;Publish(before,"正在切换 YY…",true);Log("TOGGLE requested "+before);
+      bool? beforeValue=channel.ReadState();if(!beforeValue.HasValue)throw new InvalidOperationException("STATE_UNAVAILABLE");bool before=beforeValue.Value;Publish(before,"正在切换 YY…",true);Log("TOGGLE_REQUEST state="+(before?"OPEN":"CLOSED"));
       channel.Toggle();bool changed=false;
-      for(int i=0;i<16&&!stop;i++){Thread.Sleep(100);bool? now=channel.ReadState();if(now.HasValue&&now.Value!=before){changed=true;last=now;Log("CONFIRMED "+(now.Value?"OPEN":"CLOSED"));Publish(now,now.Value?"开麦 · 点击关麦":"关麦 · 点击开麦",false);break;}}
-      if(!changed){Log("UNCONFIRMED");Publish(channel.ReadState(),"YY 未确认切换，灯的颜色保持实际读取的状态",false);}
+      for(int i=0;i<16&&!stop;i++){Thread.Sleep(100);bool? now=channel.ReadState();if(now.HasValue&&now.Value!=before){changed=true;last=now;Log("TOGGLE_CONFIRMED state="+(now.Value?"OPEN":"CLOSED"));Publish(now,now.Value?"开麦 · 点击关麦":"关麦 · 点击开麦",false);break;}}
+      if(!changed){Log("TOGGLE_UNCONFIRMED");Publish(channel.ReadState(),"YY 未确认切换，灯的颜色保持实际读取的状态",false);}
      }
     }
-   }catch(Exception e){Log("ERROR "+e.GetType().Name+" "+e.Message);channel=null;Publish(null,"YY 暂时无法读取，正在重新连接",false);}
+   }catch(Exception e){Log("ERROR type="+e.GetType().Name+" hresult=0x"+e.HResult.ToString("X8"));channel=null;Publish(null,"YY 暂时无法读取，正在重新连接",false);}
    signal.WaitOne(500);
   }
  }
- public void Dispose(){stop=true;signal.Set();}
+ public void Dispose(){Log("APP_STOP");stop=true;signal.Set();}
 }
 
 sealed class LampButton:Button {
@@ -171,6 +176,7 @@ sealed class LampForm:Form {
  readonly NotifyIcon tray=new NotifyIcon();
  readonly ToolStripMenuItem visibilityItem=new ToolStripMenuItem("隐藏悬浮窗");
  readonly ToolStripMenuItem gameItem=new ToolStripMenuItem("游戏置顶模式");
+ readonly ToolStripMenuItem logsItem=new ToolStripMenuItem("打开日志文件夹");
  readonly Native.WinEventProc foregroundCallback;
  IntPtr foregroundHook;bool gameMode=true;
  bool audioActive,audioExact;float latestPeak;
@@ -195,14 +201,15 @@ sealed class LampForm:Form {
   using(var path=Rounded(new Rectangle(0,0,CardWidth,CardHeight),11))Region=new Region(path);
   AccessibleName="YY 麦克风开关";
   backend=new Backend(log);backend.Update+=Receive;
-  audio=new AudioMonitor(backend.Trace);audio.Update+=ReceiveAudio;
+  audio=new AudioMonitor(null);audio.Update+=ReceiveAudio;
   gameItem.CheckOnClick=true;gameItem.Checked=gameMode;
   gameItem.CheckedChanged+=delegate{gameMode=gameItem.Checked;topTimer.Interval=gameMode?500:2000;SavePosition();KeepOnTop();backend.Trace("GAME_MODE "+gameMode);};
   visibilityItem.Click+=delegate{ToggleVisibility();};
-  menu.Items.Add(visibilityItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(gameItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add("退出",null,delegate{Close();});ContextMenuStrip=menu;
+  logsItem.Click+=delegate{try{Process.Start("explorer.exe",Path.GetDirectoryName(log));}catch{}};
+  menu.Items.Add(visibilityItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(gameItem);menu.Items.Add(logsItem);menu.Items.Add(new ToolStripSeparator());menu.Items.Add("退出",null,delegate{Close();});ContextMenuStrip=menu;
   tray.Icon=(Icon)Icon.Clone();tray.Text="YY 麦克风灯（双击显示或隐藏）";tray.ContextMenuStrip=menu;tray.Visible=true;
   tray.MouseDoubleClick+=delegate(object sender,MouseEventArgs e){if(e.Button==MouseButtons.Left)ToggleVisibility();};
-  Shown+=delegate{Native.SetWindowPos(Handle,new IntPtr(-1),Location.X,Location.Y,CardWidth,CardHeight,0x10);backend.Trace("WINDOW "+Bounds+" client="+ClientSize);};
+  Shown+=delegate{Native.SetWindowPos(Handle,new IntPtr(-1),Location.X,Location.Y,CardWidth,CardHeight,0x10);};
   lamp.Bounds=lampRect;lamp.FlatStyle=FlatStyle.Flat;lamp.FlatAppearance.BorderSize=0;lamp.TabStop=false;lamp.Text="";lamp.BackColor=BackColor;lamp.AccessibleName="YY 发言开关";lamp.Cursor=Cursors.Hand;
   lamp.Paint+=delegate(object sender,PaintEventArgs e){PaintLamp(e.Graphics);};
   lamp.MouseEnter+=delegate{lampHover=true;lamp.Invalidate();};lamp.MouseLeave+=delegate{lampHover=false;lamp.Invalidate();};
@@ -273,7 +280,7 @@ sealed class LampForm:Form {
 static class Program {
  [STAThread] static void Main(string[] args){
   Native.SetProcessDPIAware();bool created;using(var mutex=new Mutex(true,@"Local\YYMicLampSingleInstance",out created)){
-   if(!created)return;string log=null;foreach(string arg in args)if(arg.StartsWith("--diagnostics="))log=arg.Substring(14);
+   if(!created)return;string log=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"YYMicLamp","Logs","YYMicLamp-"+DateTime.Now.ToString("yyyyMMdd")+".log");foreach(string arg in args)if(arg.StartsWith("--diagnostics="))log=arg.Substring(14);
    Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
    Application.Run(new LampForm(log));
   }
