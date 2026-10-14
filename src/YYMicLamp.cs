@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly:System.Reflection.AssemblyTitle("YY 麦克风灯")]
 [assembly:System.Reflection.AssemblyDescription("通过 YY 自身的辅助功能按钮切换自由发言；无键盘模拟。")]
-[assembly:System.Reflection.AssemblyVersion("1.4.2.0")]
+[assembly:System.Reflection.AssemblyVersion("1.4.3.0")]
 
 static class Native {
  public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
@@ -29,6 +29,8 @@ static class Native {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder value, int count);
  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hwnd);
+ [DllImport("user32.dll",SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint msg,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);
  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x,int y,int cx,int cy,uint flags);
  [DllImport("oleacc.dll")] public static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint objectId, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object result);
@@ -66,19 +68,32 @@ sealed class Channel {
   Native.EnumWindows(delegate(IntPtr h,IntPtr l){uint id;Native.GetWindowThreadProcessId(h,out id);if(ids.Contains((int)id)&&Native.Class(h)=="QWidget"&&Regex.IsMatch(Native.Title(h),"^\\d+[-－]"))roots.Add(h);return true;},IntPtr.Zero);
   if(roots.Count==0){reason="YY_CHANNEL_WINDOW_NOT_FOUND";return null;}
   roots.Sort(delegate(IntPtr a,IntPtr b){return Native.IsWindowVisible(b).CompareTo(Native.IsWindowVisible(a));});
-  int hostCount=0,accessibleCount=0;
+  int hostCount=0,accessibleCount=0,emptyTreeCount=0;
   foreach(var root in roots){
    var hosts=new List<IntPtr>();Native.EnumChildWindows(root,delegate(IntPtr h,IntPtr l){if(Native.Class(h)=="Chrome_RenderWidgetHostHWND")hosts.Add(h);return true;},IntPtr.Zero);
    hostCount+=hosts.Count;
    foreach(var h in hosts){
     try{
      object obj;Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)!=0)continue;accessibleCount++;
-     var c=new Channel();c.Host=h;int count=0;Scan(obj as IAccessible,c,0,ref count);if(c.Voice!=null){reason="CONNECTED";return c;}
+     var accessible=obj as IAccessible;
+     if(accessible!=null&&accessible.accChildCount==0){PrimeAccessibility(h);if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)!=0)continue;accessible=obj as IAccessible;if(accessible==null||accessible.accChildCount==0){emptyTreeCount++;continue;}}
+     var c=new Channel();c.Host=h;int count=0;Scan(accessible,c,0,ref count);if(c.Voice!=null){reason="CONNECTED";return c;}
     }catch{}
    }
   }
-  reason=hostCount==0?"YY_RENDER_HOST_NOT_FOUND":accessibleCount==0?"YY_ACCESSIBILITY_UNAVAILABLE":"YY_VOICE_CONTROL_NOT_FOUND";
+  reason=hostCount==0?"YY_RENDER_HOST_NOT_FOUND":accessibleCount==0?"YY_ACCESSIBILITY_UNAVAILABLE":emptyTreeCount==accessibleCount?"YY_ACCESSIBILITY_TREE_EMPTY":"YY_VOICE_CONTROL_NOT_FOUND";
   return null;
+ }
+ static void PrimeAccessibility(IntPtr host){
+  // YY's embedded CEF browser may create its accessibility tree only after a screen-reader request.
+  IntPtr response;Native.SendMessageTimeout(host,0x3D,new IntPtr(1),new IntPtr(-4),2,300,out response);
+  var parents=new List<IntPtr>();for(IntPtr p=Native.GetParent(host);p!=IntPtr.Zero&&parents.Count<4;p=Native.GetParent(p))parents.Add(p);
+  parents.Reverse();Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+  foreach(IntPtr p in parents){string cls=Native.Class(p);if(cls!="YYCefWindow"&&cls!="CefBrowserWindow"&&cls!="Chrome_WidgetWin_0")continue;try{object obj;if(Native.AccessibleObjectFromWindow(p,0xfffffffc,ref iid,out obj)!=0)continue;int visited=0;WarmAccessibility(obj as IAccessible,0,ref visited);}catch{}}
+ }
+ static void WarmAccessibility(IAccessible a,int depth,ref int visited){
+  if(a==null||depth>6||visited++>80)return;
+  try{int n=Math.Min(a.accChildCount,100);if(n<=0)return;var children=new object[n];int got;Native.AccessibleChildren(a,0,n,children,out got);for(int i=0;i<got;i++){IAccessible child=children[i] as IAccessible;if(child==null&&children[i] is int)try{child=a.get_accChild(children[i]) as IAccessible;}catch{}WarmAccessibility(child,depth+1,ref visited);}}catch{}
  }
  static void Scan(IAccessible a,Channel result,int depth,ref int visited){
   if(a==null||depth>14||visited++>1400)return;
