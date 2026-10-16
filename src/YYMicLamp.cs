@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly:System.Reflection.AssemblyTitle("YY 麦克风灯")]
 [assembly:System.Reflection.AssemblyDescription("通过 YY 自身的辅助功能按钮切换自由发言；无键盘模拟。")]
-[assembly:System.Reflection.AssemblyVersion("1.4.4.0")]
+[assembly:System.Reflection.AssemblyVersion("1.4.5.0")]
 
 static class Native {
  public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
@@ -77,7 +77,7 @@ sealed class Channel {
      object obj;Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)!=0)continue;accessibleCount++;
      var accessible=obj as IAccessible;
      if(accessible!=null&&accessible.accChildCount==0){
-      bool pingDelivered=PrimeAccessibility(h);
+      bool pingDelivered=PrimeAccessibility(root,h);
       // YY's renderer fills the accessibility tree asynchronously after WM_GETOBJECT.
       for(int attempt=0;attempt<6;attempt++){
        Thread.Sleep(100);
@@ -91,20 +91,36 @@ sealed class Channel {
     }catch{}
    }
   }
-  reason=hostCount==0?"YY_RENDER_HOST_NOT_FOUND":accessibleCount==0?"YY_ACCESSIBILITY_UNAVAILABLE":emptyTreeCount==accessibleCount?(pingFailureCount==emptyTreeCount?"YY_ACCESSIBILITY_PING_FAILED":"YY_ACCESSIBILITY_TREE_EMPTY_AFTER_PING"):"YY_VOICE_CONTROL_NOT_FOUND";
+  reason=hostCount==0?"YY_RENDER_HOST_NOT_FOUND":accessibleCount==0?"YY_ACCESSIBILITY_UNAVAILABLE":emptyTreeCount==accessibleCount?(pingFailureCount==emptyTreeCount?"YY_ACCESSIBILITY_PING_FAILED":"YY_ACCESSIBILITY_TREE_EMPTY_AFTER_PROBE"):"YY_VOICE_CONTROL_NOT_FOUND";
   return null;
  }
- static bool PrimeAccessibility(IntPtr host){
-  // YY's embedded CEF browser may create its accessibility tree only after a screen-reader request.
-  IntPtr response;bool pingDelivered=Native.SendMessageTimeout(host,0x3D,new IntPtr(1),new IntPtr(-4),2,300,out response)!=IntPtr.Zero;
-  var parents=new List<IntPtr>();for(IntPtr p=Native.GetParent(host);p!=IntPtr.Zero&&parents.Count<4;p=Native.GetParent(p))parents.Add(p);
-  parents.Reverse();Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
-  foreach(IntPtr p in parents){string cls=Native.Class(p);if(cls!="YYCefWindow"&&cls!="CefBrowserWindow"&&cls!="Chrome_WidgetWin_0")continue;try{object obj;if(Native.AccessibleObjectFromWindow(p,0xfffffffc,ref iid,out obj)!=0)continue;int visited=0;WarmAccessibility(obj as IAccessible,0,ref visited);}catch{}}
-  return pingDelivered;
+ static bool PrimeAccessibility(IntPtr root,IntPtr host){
+  // Match the probe that reliably wakes YY: read each child window's accessibility
+  // names and roles before asking Chromium for its screen-reader tree.
+  Guid iid=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+  Native.EnumChildWindows(root,delegate(IntPtr h,IntPtr l){
+   try{object obj;if(Native.AccessibleObjectFromWindow(h,0xfffffffc,ref iid,out obj)==0){int visited=0;WarmAccessibility(obj as IAccessible,0,ref visited);}}catch{}
+   return true;
+  },IntPtr.Zero);
+  IntPtr response;
+  bool delivered=Native.SendMessageTimeout(host,0x3D,new IntPtr(1),new IntPtr(-4),2,1000,out response)!=IntPtr.Zero;
+  Thread.Sleep(300);
+  try{object obj;if(Native.AccessibleObjectFromWindow(host,0xfffffffc,ref iid,out obj)==0&&obj is IAccessible&&((IAccessible)obj).accChildCount>0)return delivered;}catch{}
+  bool alternate=Native.SendMessageTimeout(host,0x3D,new IntPtr(-4),new IntPtr(1),2,1000,out response)!=IntPtr.Zero;
+  return delivered||alternate;
  }
  static void WarmAccessibility(IAccessible a,int depth,ref int visited){
-  if(a==null||depth>6||visited++>80)return;
-  try{int n=Math.Min(a.accChildCount,100);if(n<=0)return;var children=new object[n];int got;Native.AccessibleChildren(a,0,n,children,out got);for(int i=0;i<got;i++){IAccessible child=children[i] as IAccessible;if(child==null&&children[i] is int)try{child=a.get_accChild(children[i]) as IAccessible;}catch{}WarmAccessibility(child,depth+1,ref visited);}}catch{}
+  if(a==null||depth>8||visited++>120)return;
+  try{
+   a.get_accName(0);int role=Convert.ToInt32(a.get_accRole(0));if(depth>0&&role==15)return;
+   int n=Math.Min(a.accChildCount,150);if(n<=0)return;
+   var children=new object[n];int got;Native.AccessibleChildren(a,0,n,children,out got);
+   for(int i=0;i<got;i++){
+    IAccessible child=children[i] as IAccessible;
+    if(child==null&&children[i] is int){try{a.get_accName(children[i]);a.get_accRole(children[i]);child=a.get_accChild(children[i]) as IAccessible;}catch{}}
+    WarmAccessibility(child,depth+1,ref visited);
+   }
+  }catch{}
  }
  static void Scan(IAccessible a,Channel result,int depth,ref int visited){
   if(a==null||depth>14||visited++>1400)return;
